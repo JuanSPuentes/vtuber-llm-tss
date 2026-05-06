@@ -845,3 +845,79 @@ body {
   box-shadow: 0 0 10px var(--crimson-neon);
   transition: width 0.3s ease;
 }
+
+/* ==========================================================================
+   VRM Avatar Selector Styles
+   ========================================================================== */
+
+.model-status-capsule {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.85rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.model-status-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-status-label {
+  font-size: 0.6rem;
+  color: var(--text-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.model-status-value {
+  font-size: 0.8rem;
+  color: #fff;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vrm-actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.vrm-upload-label-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  background: rgba(218, 165, 32, 0.1);
+  border: 1px solid rgba(218, 165, 32, 0.25);
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--gold-brass);
+  font-weight: 500;
+  cursor: pointer;
+  letter-spacing: 0.05em;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.vrm-upload-label-btn:hover {
+  background: rgba(218, 165, 32, 0.22);
+  border-color: var(--gold-brass);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(218, 165, 32, 0.25);
+}
+
+.vrm-url-loader-form {
+  display: flex;
+  flex-direction: column;
+}

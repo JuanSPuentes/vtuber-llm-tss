@@ -16,7 +16,9 @@ import {
   Mic,
   Clock,
   ChevronRight,
-  Database
+  Database,
+  Upload,
+  RefreshCw
 } from 'lucide-react';
 import './App.css';
 
@@ -38,6 +40,19 @@ export default function App() {
   const [loadProgress, setLoadProgress] = useState(0);
   const [vrmLoaded, setVrmLoaded] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+
+  // VRM Avatar Management States (Saved in LocalStorage)
+  const [currentVrmUrl, setCurrentVrmUrl] = useState(() => localStorage.getItem('chrono_vrm_url') || '/5834554318258545116.vrm');
+  const [customVrmName, setCustomVrmName] = useState(() => localStorage.getItem('chrono_vrm_name') || 'Cyber Girl (Default)');
+  const [vrmUrlInput, setVrmUrlInput] = useState('');
+
+  // Gracefully clean up any local browser Session Blobs on application reload to prevent null loads
+  useEffect(() => {
+    if (currentVrmUrl.startsWith('blob:')) {
+      setCurrentVrmUrl('/5834554318258545116.vrm');
+      setCustomVrmName('Cyber Girl (Default)');
+    }
+  }, []);
 
   // App Configurations (Saved in LocalStorage)
   const [engine, setEngine] = useState(() => localStorage.getItem('chrono_engine') || 'gemini');
@@ -72,6 +87,8 @@ export default function App() {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const vrmRef = useRef(null);
+  const currentVrmUrlRef = useRef(currentVrmUrl);
+  const loadingUrlRef = useRef(null);
   const controlsRef = useRef(null);
   const rendererRef = useRef(null);
   const sceneRef = useRef(null);
@@ -84,6 +101,17 @@ export default function App() {
   // Audio / Voice Refs
   const speechUtteranceRef = useRef(null);
   const currentSpeakingVolumeRef = useRef(0);
+  const isSpeakingRef = useRef(false);
+
+  // Vowel Tracking Refs for high-fidelity phonetic syllable-synced lipsync
+  const activeVowelRef = useRef('aa');
+  const vowelTimerRef = useRef(0);
+
+  // Web Audio API Persistent Refs for Real-Time Frequency Analysis Lipsync
+  const audioRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const isEdgeTTSActiveRef = useRef(false);
 
   // Smooth expression interpolation refs for ultra-realistic organic facial movements
   const smoothMouthARef = useRef(0);
@@ -225,6 +253,177 @@ export default function App() {
     return new THREE.AnimationClip('vrmAnimation', clip.duration, tracks);
   };
 
+  // Dynamic VRM Model Loader (Supports Presets, Custom URLs, and Local drag-and-drop/Files)
+  const loadVrmModel = (url) => {
+    if (!sceneRef.current) return;
+
+    const activeScene = sceneRef.current;
+
+    // Track the active URL requested to resolve async race-conditions
+    currentVrmUrlRef.current = url;
+
+    // Strict Mode double-render guard: If this exact URL is already loading on this active scene, skip duplicate load execution
+    if (loadingUrlRef.current === url) {
+      console.log("Model load in progress for URL, skipping redundant trigger:", url);
+      return;
+    }
+
+    loadingUrlRef.current = url;
+    setVrmLoaded(false);
+    setLoadProgress(0);
+
+    // 1. Clean up and dispose of previous VRM model to free GPU memory
+    if (vrmRef.current) {
+      sceneRef.current.remove(vrmRef.current.scene);
+      VRMUtils.deepDispose(vrmRef.current.scene);
+      vrmRef.current = null;
+    }
+
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+
+    loader.load(
+      url,
+      (gltf) => {
+        // Safe lock release
+        if (loadingUrlRef.current === url) {
+          loadingUrlRef.current = null;
+        }
+
+        // Scene instance verification for React Strict Mode double-mount cycles
+        if (sceneRef.current !== activeScene) {
+          console.warn("Discarding asynchronously loaded VRM model as Three.js scene instance has changed.");
+          const oldVrm = gltf.userData.vrm;
+          if (oldVrm) {
+            VRMUtils.deepDispose(oldVrm.scene);
+          }
+          return;
+        }
+
+        // Asynchronous check: If the active URL state has shifted during the network load duration, discard this object to prevent twin overlays
+        if (currentVrmUrlRef.current !== url) {
+          console.warn("Discarding asynchronously loaded VRM model as requested URL shifted:", url);
+          const oldVrm = gltf.userData.vrm;
+          if (oldVrm) {
+            VRMUtils.deepDispose(oldVrm.scene);
+          }
+          return;
+        }
+
+        const vrm = gltf.userData.vrm;
+        vrmRef.current = vrm;
+        sceneRef.current.add(vrm.scene);
+
+        // Capture standard VRM humanoid rest pose bone orientations BEFORE any rotation/transformation is applied
+        const standardVrmBones = [
+          'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+          'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm',
+          'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
+          'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+          'leftFoot', 'rightFoot'
+        ];
+        const restPose = {};
+        standardVrmBones.forEach((boneName) => {
+          const boneNode = vrm.humanoid.getNormalizedBoneNode(boneName);
+          if (boneNode) {
+            restPose[boneName] = boneNode.quaternion.clone();
+          }
+        });
+        vrmRestPoseRef.current = restPose;
+
+        // Hide model initially until FBX pose is fully applied!
+        vrm.scene.visible = false;
+
+        // Standard orientation fix
+        VRMUtils.rotateVRM0(vrm);
+
+        // Apply initial positions
+        vrm.scene.position.set(vrmPosX, vrmPosY, vrmPosZ);
+        vrm.scene.scale.set(vrmScale, vrmScale, vrmScale);
+
+        // Face front
+        vrm.scene.rotation.y = Math.PI;
+
+        // Load the default FBX Standing pose as the initial pose, then complete!
+        loadFbxPose(vrm);
+      },
+      (xhr) => {
+        if (xhr.total > 0) {
+          const progress = Math.round((xhr.loaded / xhr.total) * 100);
+          setLoadProgress(progress);
+        } else {
+          // Fallback loader simulator for chunked assets
+          setLoadProgress(prev => Math.min(99, prev + 2));
+        }
+      },
+      (error) => {
+        if (loadingUrlRef.current === url) {
+          loadingUrlRef.current = null;
+        }
+        console.error('Error loading VRM model:', error);
+        alert('Error al cargar el modelo VRM. Por favor, asegúrate de que es un archivo .vrm válido y tiene habilitado CORS.');
+        setVrmLoaded(true); // Re-enable display on error
+      }
+    );
+  };
+
+  // Local File Selector Callback (Converts uploaded VRM file to memory Blob URL)
+  const handleVrmFileChange = (event) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      if (!file.name.toLowerCase().endsWith('.vrm')) {
+        alert('Por favor, selecciona un archivo con extensión .vrm');
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      setCurrentVrmUrl(url);
+      setCustomVrmName(file.name);
+    }
+  };
+
+  // Custom External URL Loader (With clean validation)
+  const handleCustomVrmUrlLoad = (e) => {
+    e.preventDefault();
+    if (!vrmUrlInput.trim()) return;
+    
+    let url = vrmUrlInput.trim();
+    // Simple sanitization
+    if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('/')) {
+      url = 'https://' + url;
+    }
+
+    // Try to extract a clean filename from the URL
+    let name = 'Custom Avatar';
+    try {
+      const parsed = new URL(url);
+      const pathname = parsed.pathname;
+      const part = pathname.substring(pathname.lastIndexOf('/') + 1);
+      if (part && part.toLowerCase().endsWith('.vrm')) {
+        name = part;
+      }
+    } catch (_) {}
+
+    setCurrentVrmUrl(url);
+    setCustomVrmName(name);
+    setVrmUrlInput('');
+  };
+
+  // Restore Default Model
+  const handleResetToDefaultVrm = () => {
+    setCurrentVrmUrl('/5834554318258545116.vrm');
+    setCustomVrmName('Cyber Girl (Default)');
+  };
+
+  // Save selected model paths to localStorage and trigger reload when URLs shift
+  useEffect(() => {
+    localStorage.setItem('chrono_vrm_url', currentVrmUrl);
+    localStorage.setItem('chrono_vrm_name', customVrmName);
+
+    if (sceneRef.current && currentVrmUrl) {
+      loadVrmModel(currentVrmUrl);
+    }
+  }, [currentVrmUrl]);
+
   // Load and apply the default FBX Pose
   const loadFbxPose = (vrmInstance, onComplete) => {
     const fbxLoader = new FBXLoader();
@@ -319,6 +518,20 @@ export default function App() {
     }
   };
 
+  // Warm up Web Speech API voices on startup to prevent initial silence lag
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      const handleVoicesChanged = () => {
+        window.speechSynthesis.getVoices();
+      };
+      window.speechSynthesis.addEventListener('voiceschanged', handleVoicesChanged);
+      return () => {
+        window.speechSynthesis.removeEventListener('voiceschanged', handleVoicesChanged);
+      };
+    }
+  }, []);
+
   // Initialize Three.js Scene and Load VRM Model
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -380,66 +593,16 @@ export default function App() {
     frontLight.position.set(0, 1.5, 1.5);
     scene.add(frontLight);
 
-    // GLTF LOADER WITH VRM PLUGIN
-    const loader = new GLTFLoader();
-    loader.register((parser) => new VRMLoaderPlugin(parser));
-
-    loader.load(
-      '/5834554318258545116.vrm',
-      (gltf) => {
-        const vrm = gltf.userData.vrm;
-        vrmRef.current = vrm;
-        scene.add(vrm.scene);
-
-        // Capture standard VRM humanoid rest pose bone orientations BEFORE any rotation/transformation is applied
-        const standardVrmBones = [
-          'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
-          'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm',
-          'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
-          'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
-          'leftFoot', 'rightFoot'
-        ];
-        const restPose = {};
-        standardVrmBones.forEach((boneName) => {
-          const boneNode = vrm.humanoid.getNormalizedBoneNode(boneName);
-          if (boneNode) {
-            restPose[boneName] = boneNode.quaternion.clone();
-          }
-        });
-        vrmRestPoseRef.current = restPose;
-
-        // Hide model initially until FBX pose is fully applied!
-        vrm.scene.visible = false;
-
-        // Standard orientation fix
-        VRMUtils.rotateVRM0(vrm);
-
-        // Apply initial positions
-        vrm.scene.position.set(vrmPosX, vrmPosY, vrmPosZ);
-        vrm.scene.scale.set(vrmScale, vrmScale, vrmScale);
-
-        // Face front
-        vrm.scene.rotation.y = Math.PI;
-
-        // Load the default FBX Standing pose as the initial pose, then start the loop!
-        loadFbxPose(vrm, () => {
-          requestAnimationFrame((t) => {
-            lastTime = t * 0.001;
-            animate(t);
-          });
-        });
-      },
-      (xhr) => {
-        const progress = Math.round((xhr.loaded / xhr.total) * 100);
-        setLoadProgress(progress);
-      },
-      (error) => {
-        console.error('Error loading VRM model:', error);
-      }
-    );
+    // Mount the scene and load initial VRM model
+    sceneRef.current = scene;
+    loadVrmModel(currentVrmUrl);
 
     // Animation organic loops & timers
     let lastTime = 0;
+    requestAnimationFrame((t) => {
+      lastTime = t * 0.001;
+      animate(t);
+    });
     let blinkTimer = 0;
     let nextBlinkDuration = 3.0;
     let isBlinking = false;
@@ -553,7 +716,30 @@ export default function App() {
           }
         }
 
-        // 5. Expression Layer: Organic Multi-Phoneme Lip-Sync & Breathing Micro-Smile
+        // Real-Time Audio Frequency Analysis for Mathematical Lipsync (Analyser FFT) - ONLY when playing premium Edge-TTS
+        if (isSpeakingRef.current && isEdgeTTSActiveRef.current && analyserRef.current) {
+          const bufferLength = analyserRef.current.frequencyBinCount;
+          const dataArray = new Uint8Array(bufferLength);
+          analyserRef.current.getByteFrequencyData(dataArray);
+
+          let sum = 0;
+          let count = 0;
+          // Analyze the human vocal frequency range bins (typically indices 2 to 32 for speech frequencies in 1024 FFT size)
+          for (let i = 2; i < Math.min(32, bufferLength); i++) {
+            sum += dataArray[i];
+            count++;
+          }
+          const average = sum / (count || 1);
+          // Normalize average to [0.0, 1.0] range (human speech peak is around 110-120 in byte frequency values)
+          const rawVol = Math.min(1.0, average / 115.0);
+          
+          // Smoothen the volume reading to eliminate high frequency frame jitters
+          currentSpeakingVolumeRef.current += (rawVol - currentSpeakingVolumeRef.current) * 0.28;
+        } else if (!isSpeakingRef.current) {
+          currentSpeakingVolumeRef.current = 0;
+        }
+
+        // 5. Expression Layer: Organic Dual-Engine Lip-Sync & Breathing Micro-Smile
         let targetA = 0;
         let targetI = 0;
         let targetO = 0;
@@ -561,26 +747,48 @@ export default function App() {
         let targetU = 0;
         let targetSmile = 0.15; // CONSTANT CUTE MICRO-SMILE BASE TO ELIMINATE DEADPAN EXPRESSIONS
 
-        if (isSpeaking) {
-          // Dynamic volume modifier with subtle natural noise/fluctuation
-          const volumeFactor = currentSpeakingVolumeRef.current * (0.8 + Math.random() * 0.4);
+        if (isSpeakingRef.current) {
+          if (isEdgeTTSActiveRef.current) {
+            // High-quality fluid procedural VTuber conversational chatter modulated by real-time voice volume!
+            const volumeFactor = currentSpeakingVolumeRef.current;
+            const speed = 14.0;
+            // The chatter magnitude is directly driven by the volume of the audio!
+            const chatter = volumeFactor * Math.max(0.2, Math.sin(elapsed * speed) + Math.cos(elapsed * speed * 0.75)) * 0.42;
+            
+            // Morph dynamically between vowels for realistic jaw and lip movements
+            const vowelMix = Math.sin(elapsed * 3.5);
+            if (vowelMix > 0.4) {
+              targetA = chatter * 0.85;
+              targetSmile = 0.28;
+            } else if (vowelMix > -0.2) {
+              targetI = chatter * 0.50;
+              targetU = chatter * 0.40;
+              targetSmile = 0.25;
+            } else {
+              targetO = chatter * 0.75;
+              targetSmile = 0.22;
+            }
+          } else {
+            // Local Phonetic-Mapped Syllable Lipsync
+            if (vowelTimerRef.current > 0) {
+              vowelTimerRef.current -= delta;
+              
+              // Add a natural breathing vibrato/jitter to the speaking mouth shape
+              const jitter = 0.85 + Math.sin(elapsed * 25.0) * 0.15;
+              
+              if (activeVowelRef.current === 'aa') targetA = 0.75 * jitter;
+              else if (activeVowelRef.current === 'ih') targetI = 0.65 * jitter;
+              else if (activeVowelRef.current === 'oh') targetO = 0.70 * jitter;
+              else if (activeVowelRef.current === 'ee') targetE = 0.60 * jitter;
+              else if (activeVowelRef.current === 'uu') targetU = 0.50 * jitter;
+            } else {
+              // Fallback organic chatter if no boundary event is currently active or between syllables
+              const speed = 12.0;
+              const chatter = Math.max(0, Math.sin(elapsed * speed)) * 0.45;
+              targetA = chatter;
+            }
+          }
           
-          // Generate organic vowel wave phases to simulate realistic phonemic shifts
-          const speed = 15.0;
-          const waveA = Math.max(0, Math.sin(elapsed * speed * 0.9));
-          const waveI = Math.max(0, Math.sin(elapsed * speed * 1.3 + 1.2));
-          const waveO = Math.max(0, Math.cos(elapsed * speed * 0.7 + 2.5));
-          const waveE = Math.max(0, Math.sin(elapsed * speed * 1.1 + 0.8));
-          const waveU = Math.max(0, Math.cos(elapsed * speed * 1.6 + 3.1));
-
-          // Set vowel targets
-          targetA = waveA * volumeFactor * 0.75;
-          targetI = waveI * volumeFactor * 0.50;
-          targetO = waveO * volumeFactor * 0.65;
-          targetE = waveE * volumeFactor * 0.55;
-          targetU = waveU * volumeFactor * 0.40;
-          
-          // Smile slightly more when speaking cheerfully!
           targetSmile = 0.24 + Math.sin(elapsed * 4.0) * 0.08;
         } else {
           // Subtle breathing micro-smile to make the idle character feel warm and "alive"
@@ -642,57 +850,247 @@ export default function App() {
       if (vrmRef.current) {
         scene.remove(vrmRef.current.scene);
         VRMUtils.deepDispose(vrmRef.current.scene);
+        vrmRef.current = null;
       }
 
       if (rendererRef.current) {
         rendererRef.current.dispose();
+        rendererRef.current = null;
+      }
+
+      sceneRef.current = null;
+      vrmMixerRef.current = null;
+      loadingUrlRef.current = null;
+
+      // Cleanup Web Audio elements to prevent memory leaks
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
       }
     };
   }, []);
 
-  // Synthesize Speech and trigger Lip-Sync
-  const speakText = (text) => {
+  // Synthesize Speech and trigger Syllable-Synced Lip-Sync (Dual Engine: Edge-TTS with Local Fallback)
+  const speakText = async (text) => {
+    // Single persistent audio & analyser pipeline setup to prevent reconstruction bugs in Chrome/Edge
+    const getAudioInstance = () => {
+      if (!audioRef.current) {
+        const audio = new Audio();
+        audio.crossOrigin = "anonymous"; // Safe direct CORS authorization
+        audioRef.current = audio;
+
+        try {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          const ctx = new AudioContextClass();
+          audioContextRef.current = ctx;
+
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 1024; // Pristine studio quality
+          analyserRef.current = analyser;
+
+          const source = ctx.createMediaElementSource(audio);
+          source.connect(analyser);
+          analyser.connect(ctx.destination);
+        } catch (e) {
+          console.warn("Web Audio API initial routing block:", e);
+        }
+      }
+      return audioRef.current;
+    };
+
+    // 1. Cancel and pause any currently playing audio streams
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume(); // Chrome TTS hang-up queue fix
+    
     setIsSpeaking(false);
+    isSpeakingRef.current = false;
+    isEdgeTTSActiveRef.current = false;
+    activeVowelRef.current = null;
+    vowelTimerRef.current = 0;
     currentSpeakingVolumeRef.current = 0;
 
     if (!text) return;
 
+    // Filter out parenthetical comments (e.g. "(Smiles) こんにちは" -> "こんにちは")
     const speechText = text.replace(/\([\s\S]*?\)/g, '').trim();
+    if (!speechText) return;
+
+    // A. Setup local SpeechSynthesis utterance as backup
     const utterance = new SpeechSynthesisUtterance(speechText);
+    utterance.lang = 'ja-JP';
     speechUtteranceRef.current = utterance;
 
     const voices = window.speechSynthesis.getVoices();
-    const japaneseVoice = voices.find(voice => voice.lang.startsWith('ja') || voice.lang.includes('JP'));
-
+    let japaneseVoice = voices.find(voice => voice.lang.startsWith('ja') || voice.lang.includes('JP'));
+    if (!japaneseVoice) {
+      japaneseVoice = voices.find(voice => /ja|jp/i.test(voice.lang));
+    }
     if (japaneseVoice) {
       utterance.voice = japaneseVoice;
     }
 
-    utterance.volume = voiceVolume;
-    utterance.rate = voiceRate;
-    utterance.pitch = voicePitch;
+    // Default unmodified parameters for natural, unmodified voice output
+    utterance.volume = 1.0;
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
 
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-      currentSpeakingVolumeRef.current = 1.0;
+    // Local Phonetic Vowel Extractor
+    const getJapaneseVowel = (char) => {
+      if (!char) return null;
+      const aChars = /[あかさたなはまやらわかがざだばぱァカサタナハマヤラワガザダバパ]/;
+      const iChars = /[いきしちにひみりぎじぢびぴィキシチニヒミリギジヂビピ]/;
+      const uChars = /[うくすつぬふむゆるぐずづぶぷぅゥクスツヌフムユルグズヅブプ]/;
+      const eChars = /[えけせてねへめれげぜでべぺェケセテネヘメレゲゼデベペ]/;
+      const oChars = /[おこそとのほmoよろごぞどぼぽォコソトノホモヨロゴゾドボポ]/;
+
+      if (aChars.test(char)) return 'aa';
+      if (iChars.test(char)) return 'ih';
+      if (uChars.test(char)) return 'uu';
+      if (eChars.test(char)) return 'ee';
+      if (oChars.test(char)) return 'oh';
+      return null;
     };
 
-    utterance.onboundary = () => {
-      currentSpeakingVolumeRef.current = 0.8 + Math.random() * 0.2;
+    utterance.onstart = () => {
+      if (!isEdgeTTSActiveRef.current) {
+        isSpeakingRef.current = true;
+        setIsSpeaking(true);
+      }
+    };
+
+    utterance.onboundary = (event) => {
+      if (!isEdgeTTSActiveRef.current && (event.name === 'word' || event.name === 'character' || !event.name)) {
+        const charIndex = event.charIndex;
+        const char = speechText.charAt(charIndex);
+        const vowel = getJapaneseVowel(char);
+        if (vowel) {
+          activeVowelRef.current = vowel;
+          vowelTimerRef.current = 0.22;
+        }
+      }
     };
 
     utterance.onend = () => {
-      setIsSpeaking(false);
-      currentSpeakingVolumeRef.current = 0;
+      if (!isEdgeTTSActiveRef.current) {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        activeVowelRef.current = null;
+        vowelTimerRef.current = 0;
+      }
     };
 
     utterance.onerror = () => {
-      setIsSpeaking(false);
-      currentSpeakingVolumeRef.current = 0;
+      if (!isEdgeTTSActiveRef.current) {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        activeVowelRef.current = null;
+        vowelTimerRef.current = 0;
+      }
     };
 
-    window.speechSynthesis.speak(utterance);
+    // B. Attempt to Fetch Premium Edge-TTS from Hugging Face Space (Gradio v5 Queue-Stream Client)
+    let ttsUrl = '';
+    let isEdgeTTSSuccessful = false;
+
+    try {
+      // 1. Join the Gradio v5 queue for the tts_interface endpoint
+      const joinResponse = await fetch('https://innoai-edge-tts-text-to-speech.hf.space/gradio_api/call/tts_interface', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: [
+            speechText,
+            "ja-JP-NanamiNeural - ja-JP (Female)", // Match exact formatted dropdown choice string
+            0,                                     // Unmodified speed adjustment rate slider
+            0                                      // Unmodified pitch adjustment Hz slider
+          ]
+        }),
+        signal: AbortSignal.timeout(3500) // 3.5s timeout threshold
+      });
+
+      if (!joinResponse.ok) {
+        throw new Error("Edge TTS queue join error");
+      }
+
+      const joinData = await joinResponse.json();
+      const eventId = joinData.event_id;
+      if (!eventId) {
+        throw new Error("No Gradio event ID received");
+      }
+
+      // 2. Fetch/Poll the completed result stream
+      const streamUrl = `https://innoai-edge-tts-text-to-speech.hf.space/gradio_api/call/tts_interface/${eventId}`;
+      const streamResponse = await fetch(streamUrl, {
+        signal: AbortSignal.timeout(4500) // 4.5s stream timeout threshold
+      });
+
+      if (!streamResponse.ok) {
+        throw new Error("Edge TTS event stream status error");
+      }
+
+      const streamText = await streamResponse.text();
+      // Match the generated MP3 file URL from the completed SSE payload
+      const urlMatch = streamText.match(/"url":\s*"([^"]+)"/);
+      if (urlMatch && urlMatch[1]) {
+        ttsUrl = urlMatch[1];
+        isEdgeTTSSuccessful = true;
+      } else {
+        throw new Error("Audio URL not found in stream response");
+      }
+    } catch (err) {
+      console.warn("Edge-TTS connection failed, routing local native fallback:", err.message);
+    }
+
+    if (isEdgeTTSSuccessful && ttsUrl) {
+      // PLAY PREMIUM EDGE-TTS WITH NATIVE HARDWARE AUDIO DIRECTLY (100% pure & unfiltered)
+      isEdgeTTSActiveRef.current = true;
+      
+      const audio = getAudioInstance();
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+
+      audio.src = ttsUrl;
+
+      audio.onplay = () => {
+        isSpeakingRef.current = true;
+        setIsSpeaking(true);
+      };
+
+      audio.onended = () => {
+        isSpeakingRef.current = false;
+        setIsSpeaking(false);
+        isEdgeTTSActiveRef.current = false;
+        currentSpeakingVolumeRef.current = 0;
+      };
+
+      audio.onerror = (e) => {
+        console.warn("Edge TTS audio playing error, falling back:", e);
+        isEdgeTTSActiveRef.current = false;
+        currentSpeakingVolumeRef.current = 0;
+        window.speechSynthesis.speak(utterance);
+      };
+
+      audio.play().catch(err => {
+        console.warn("Autoplay block, falling back to local speech synthesis:", err);
+        isEdgeTTSActiveRef.current = false;
+        currentSpeakingVolumeRef.current = 0;
+        window.speechSynthesis.speak(utterance);
+      });
+
+    } else {
+      // PLAY LOCAL NATIVE SYNTHESIS VOICE
+      isEdgeTTSActiveRef.current = false;
+      window.speechSynthesis.speak(utterance);
+    }
   };
 
   // Send Message to AI (Gemini or Ollama)
@@ -1206,6 +1604,75 @@ export default function App() {
                   className="slider-input"
                 />
               </div>
+            </div>
+
+            {/* AVATAR VRM SELECTOR SEGMENT */}
+            <div className="settings-control-group" style={{ borderTop: '1px solid rgba(255, 255, 255, 0.04)', paddingTop: '1.25rem' }}>
+              <div className="control-subheader">
+                <Camera style={{ width: '0.9rem', height: '0.9rem', color: 'var(--crimson-neon)' }} />
+                <span>AVATAR DIGITAL (VRM)</span>
+              </div>
+
+              {/* Active Model Summary Capsule */}
+              <div className="model-status-capsule">
+                <span className="status-dot" style={{ background: 'var(--gold-brass)' }} />
+                <div className="model-status-info" style={{ width: '100%' }}>
+                  <span className="model-status-label">Avatar Activo:</span>
+                  <span className="model-status-value" title={customVrmName}>{customVrmName}</span>
+                </div>
+              </div>
+
+              {/* Preset Model Option Grid / Action triggers */}
+              <div className="vrm-actions-list">
+                {/* Upload Local File Box Label button */}
+                <label htmlFor="vrm-local-uploader" className="vrm-upload-label-btn">
+                  <Upload style={{ width: '0.9rem', height: '0.9rem' }} />
+                  <span>Cargar .vrm desde PC</span>
+                  <input
+                    id="vrm-local-uploader"
+                    type="file"
+                    accept=".vrm"
+                    onChange={handleVrmFileChange}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+
+                {/* Reset to Default Button */}
+                {currentVrmUrl !== '/5834554318258545116.vrm' && (
+                  <button
+                    type="button"
+                    onClick={handleResetToDefaultVrm}
+                    className="btn-secondary-flat"
+                    style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', width: '100%' }}
+                  >
+                    <RefreshCw style={{ width: '0.8rem', height: '0.8rem' }} />
+                    Restaurar Avatar Original
+                  </button>
+                )}
+              </div>
+
+              {/* URL Load Input field Form */}
+              <form onSubmit={handleCustomVrmUrlLoad} className="vrm-url-loader-form" style={{ marginTop: '1rem' }}>
+                <span className="drawer-label" style={{ fontSize: '0.65rem', marginBottom: '0.35rem' }}>Cargar desde URL externa (.vrm)</span>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={vrmUrlInput}
+                    onChange={(e) => setVrmUrlInput(e.target.value)}
+                    placeholder="https://ejemplo.com/modelo.vrm"
+                    className="text-input-settings"
+                    style={{ flex: 1, margin: 0, height: '2rem', fontSize: '0.75rem' }}
+                  />
+                  <button
+                    type="submit"
+                    disabled={!vrmUrlInput.trim()}
+                    className="btn-glass"
+                    style={{ padding: '0 0.75rem', height: '2rem', fontSize: '0.75rem' }}
+                  >
+                    Cargar
+                  </button>
+                </div>
+              </form>
             </div>
 
             {/* ESCENA 3D (Deshabilitada por defecto y comentada para preservar el código)
