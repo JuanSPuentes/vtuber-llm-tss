@@ -519,11 +519,18 @@ export default function App() {
     orbitControlsEnabled
   ]);
 
-  // Reset Camera to focus on the facial framing center of the VRM
+  // Restablece la cámara enfocando el cuerpo y elevando visualmente al personaje en la pantalla
   const resetCameraToCinematic = () => {
     if (cameraRef.current && controlsRef.current) {
+      // Para hacer que el personaje suba visualmente en la pantalla, bajamos el punto de enfoque del objetivo (target)
+      // de la cámara. Al apuntar a la altura del pecho/torso (1.0 + vrmPosY) en vez de al rostro (1.45), el modelo
+      // se desplaza de manera natural hacia la parte superior del marco visual, dejando ver más de su cuerpo.
       controlsRef.current.target.set(0.0, 1.0 + vrmPosY, vrmPosZ);
+
+      // Posicionamos la cámara ligeramente más arriba que el objetivo de enfoque (1.1 + vrmPosY) y a una cómoda
+      // distancia focal de 2.35 unidades en el eje de profundidad Z para lograr un plano cinemático amplio.
       cameraRef.current.position.set(0.0, 1.1 + vrmPosY, 2.35 + vrmPosZ);
+      
       controlsRef.current.update();
     }
   };
@@ -1677,7 +1684,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* URL Load Input field Form */}
+              {/* URL Load Input field Form (Comentado e inhabilitado a petición del usuario)
               <form onSubmit={handleCustomVrmUrlLoad} className="vrm-url-loader-form" style={{ marginTop: '1rem' }}>
                 <span className="drawer-label" style={{ fontSize: '0.65rem', marginBottom: '0.35rem' }}>Cargar desde URL externa (.vrm)</span>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -1699,6 +1706,7 @@ export default function App() {
                   </button>
                 </div>
               </form>
+              */}
             </div>
 
             {/* ESCENA 3D (Deshabilitada por defecto y comentada para preservar el código)
