@@ -66,6 +66,8 @@ export default function App() {
   const [openrouterModel, setOpenrouterModel] = useState(() => localStorage.getItem('chrono_openrouter_model') || 'google/gemini-2.5-flash');
   const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem('chrono_gemini_model') || 'gemini-2.5-flash');
   const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('chrono_ollama_model') || 'llama3');
+  const [voiceLanguage, setVoiceLanguage] = useState(() => localStorage.getItem('chrono_voice_language') || 'ja');
+  const [avatarVoice, setAvatarVoice] = useState(() => localStorage.getItem('chrono_avatar_voice') || 'ja-JP-NanamiNeural - ja-JP (Female)');
 
   // Default system prompt/personality configuration
   const defaultPersonality = "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples) ya que serán reproducidas por un sintetizador de voz. Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera).";
@@ -108,6 +110,11 @@ export default function App() {
   const speechUtteranceRef = useRef(null);
   const currentSpeakingVolumeRef = useRef(0);
   const isSpeakingRef = useRef(false);
+
+  // Refs para el sistema de transmisión de voz (Stream-to-Stream)
+  const abortControllerRef = useRef(null);
+  const audioQueueRef = useRef([]);
+  const audioQueuePlayingRef = useRef(false);
 
   // Vowel Tracking Refs for high-fidelity phonetic syllable-synced lipsync
   const activeVowelRef = useRef('aa');
@@ -494,6 +501,8 @@ export default function App() {
     localStorage.setItem('chrono_gemini_model', geminiModel);
     localStorage.setItem('chrono_ollama_model', ollamaModel);
     localStorage.setItem('chrono_avatar_personality', avatarPersonality);
+    localStorage.setItem('chrono_voice_language', voiceLanguage);
+    localStorage.setItem('chrono_avatar_voice', avatarVoice);
     localStorage.setItem('chrono_volume', voiceVolume.toString());
     localStorage.setItem('chrono_rate', voiceRate.toString());
     localStorage.setItem('chrono_pitch', voicePitch.toString());
@@ -519,11 +528,29 @@ export default function App() {
     geminiModel,
     ollamaModel,
     avatarPersonality,
+    voiceLanguage,
+    avatarVoice,
     voiceVolume,
     voiceRate,
     voicePitch,
     orbitControlsEnabled
   ]);
+
+  // Maneja el cambio de idioma del avatar actualizando automáticamente la voz correspondiente
+  const handleLanguageChange = (lang) => {
+    setVoiceLanguage(lang);
+    if (lang === 'ja') {
+      setAvatarVoice('ja-JP-NanamiNeural - ja-JP (Female)');
+    } else if (lang === 'es_mx') {
+      setAvatarVoice('es-MX-DaliaNeural - es-MX (Female)');
+    } else if (lang === 'es_es') {
+      setAvatarVoice('es-ES-ElviraNeural - es-ES (Female)');
+    } else if (lang === 'en_us') {
+      setAvatarVoice('en-US-AriaNeural - en-US (Female)');
+    } else if (lang === 'en_gb') {
+      setAvatarVoice('en-GB-SoniaNeural - en-GB (Female)');
+    }
+  };
 
   // Restablece la cámara enfocando el cuerpo y elevando visualmente al personaje en la pantalla
   const resetCameraToCinematic = () => {
@@ -640,7 +667,8 @@ export default function App() {
     };
     window.addEventListener('mousemove', handleMouseMove);
 
-    // Cute Avatar Click Interactions
+    // Cute Avatar Click Interactions (Comentado a petición del usuario para quitar las interacciones con clic)
+    /*
     const handleCanvasClick = () => {
       if (!vrmRef.current) return;
       const reactions = [
@@ -662,6 +690,7 @@ export default function App() {
       }
     };
     rendererRef.current.domElement.addEventListener('click', handleCanvasClick);
+    */
 
     const animate = (time) => {
       animationFrameIdRef.current = requestAnimationFrame(animate);
@@ -865,9 +894,11 @@ export default function App() {
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('mousemove', handleMouseMove);
+      /*
       if (rendererRef.current) {
         rendererRef.current.domElement.removeEventListener('click', handleCanvasClick);
       }
+      */
       cancelAnimationFrame(animationFrameIdRef.current);
 
       if (vrmRef.current) {
@@ -897,34 +928,155 @@ export default function App() {
     };
   }, []);
 
+  // Single persistent audio & analyser pipeline setup to prevent reconstruction bugs in Chrome/Edge
+  const getAudioInstance = () => {
+    if (!audioRef.current) {
+      const audio = new Audio();
+      audio.crossOrigin = "anonymous"; // Safe direct CORS authorization
+      audioRef.current = audio;
+
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioContextClass();
+        audioContextRef.current = ctx;
+
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024; // Pristine studio quality
+        analyserRef.current = analyser;
+
+        const source = ctx.createMediaElementSource(audio);
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+      } catch (e) {
+        console.warn("Web Audio API initial routing block:", e);
+      }
+    }
+    return audioRef.current;
+  };
+
+  // Cola de Reproducción de Voz Secuencial (Ultra-Baja Latencia)
+  const playNextInQueue = async () => {
+    if (audioQueueRef.current.length === 0) {
+      audioQueuePlayingRef.current = false;
+      isSpeakingRef.current = false;
+      setIsSpeaking(false);
+      isEdgeTTSActiveRef.current = false;
+      currentSpeakingVolumeRef.current = 0;
+      return;
+    }
+
+    audioQueuePlayingRef.current = true;
+    const nextText = audioQueueRef.current.shift();
+
+    try {
+      // 1. Sanitizar el texto quitando emojis y símbolos molestos antes del TTS
+      const cleanText = nextText
+        .replace(/\([\s\S]*?\)/g, '')
+        .replace(/[\u2600-\u27BF]/g, '')
+        .replace(/\p{Emoji_Presentation}/gu, '')
+        .replace(/\p{Extended_Pictographic}/gu, '')
+        .replace(/[\uE000-\uF8FF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]/g, '')
+        .trim();
+
+      if (!cleanText) {
+        playNextInQueue();
+        return;
+      }
+
+      isEdgeTTSActiveRef.current = true;
+      const audio = getAudioInstance();
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+
+      // 2. Apuntar al endpoint de transmisión ultra-rápida asíncrona de nuestro servidor local de Python
+      const localTtsUrl = `http://127.0.0.1:8000/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(avatarVoice)}`;
+      audio.src = localTtsUrl;
+
+      audio.onplay = () => {
+        isSpeakingRef.current = true;
+        setIsSpeaking(true);
+      };
+
+      audio.onended = () => {
+        // Al terminar el fragmento, reproduce inmediatamente el siguiente en la cola sin baches
+        playNextInQueue();
+      };
+
+      audio.onerror = (e) => {
+        console.warn("Error en el reproductor de cola local. Ejecutando fallback nativo:", e);
+        // Fallback local robusto con el motor de voz del sistema/navegador en caso de fallo de red
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        
+        let mappedLang = 'ja-JP';
+        if (voiceLanguage === 'es_mx') mappedLang = 'es-MX';
+        else if (voiceLanguage === 'es_es') mappedLang = 'es-ES';
+        else if (voiceLanguage === 'en_us') mappedLang = 'en-US';
+        else if (voiceLanguage === 'en_gb') mappedLang = 'en-GB';
+        
+        utterance.lang = mappedLang;
+        
+        utterance.onend = () => {
+          playNextInQueue();
+        };
+        utterance.onerror = () => {
+          playNextInQueue();
+        };
+        
+        const voices = window.speechSynthesis.getVoices();
+        let selectedVoice = null;
+        if (voiceLanguage === 'ja') {
+          selectedVoice = voices.find(v => v.lang.startsWith('ja') || v.lang.includes('JP'));
+        } else if (voiceLanguage.startsWith('es')) {
+          const sub = voiceLanguage === 'es_mx' ? 'MX' : 'ES';
+          selectedVoice = voices.find(v => v.lang.includes(sub)) || voices.find(v => v.lang.startsWith('es'));
+        } else if (voiceLanguage.startsWith('en')) {
+          const sub = voiceLanguage === 'en_us' ? 'US' : 'GB';
+          selectedVoice = voices.find(v => v.lang.includes(sub)) || voices.find(v => v.lang.startsWith('en'));
+        }
+        
+        if (selectedVoice) utterance.voice = selectedVoice;
+        window.speechSynthesis.speak(utterance);
+      };
+
+      await audio.play();
+
+    } catch (err) {
+      console.warn("Fallo de reproducción asíncrona de segmento, saltando:", err);
+      playNextInQueue();
+    }
+  };
+
+  const queueSpeech = (text) => {
+    audioQueueRef.current.push(text);
+    if (!audioQueuePlayingRef.current) {
+      playNextInQueue();
+    }
+  };
+
+  const stopAndClearSpeechQueue = () => {
+    // Detener la reproducción de HTMLAudioElement en curso y desvincular listeners para evitar fallbacks falsos
+    if (audioRef.current) {
+      audioRef.current.onplay = null;
+      audioRef.current.onended = null;
+      audioRef.current.onerror = null;
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    // Detener cualquier síntesis del sistema
+    window.speechSynthesis.cancel();
+
+    // Resetear variables de control
+    audioQueueRef.current = [];
+    audioQueuePlayingRef.current = false;
+    isSpeakingRef.current = false;
+    setIsSpeaking(false);
+    isEdgeTTSActiveRef.current = false;
+    currentSpeakingVolumeRef.current = 0;
+  };
+
   // Synthesize Speech and trigger Syllable-Synced Lip-Sync (Dual Engine: Edge-TTS with Local Fallback)
   const speakText = async (text) => {
-    // Single persistent audio & analyser pipeline setup to prevent reconstruction bugs in Chrome/Edge
-    const getAudioInstance = () => {
-      if (!audioRef.current) {
-        const audio = new Audio();
-        audio.crossOrigin = "anonymous"; // Safe direct CORS authorization
-        audioRef.current = audio;
-
-        try {
-          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-          const ctx = new AudioContextClass();
-          audioContextRef.current = ctx;
-
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 1024; // Pristine studio quality
-          analyserRef.current = analyser;
-
-          const source = ctx.createMediaElementSource(audio);
-          source.connect(analyser);
-          analyser.connect(ctx.destination);
-        } catch (e) {
-          console.warn("Web Audio API initial routing block:", e);
-        }
-      }
-      return audioRef.current;
-    };
-
     // 1. Cancel and pause any currently playing audio streams
     if (audioRef.current) {
       audioRef.current.pause();
@@ -943,21 +1095,45 @@ export default function App() {
     if (!text) return;
 
     // Filter out parenthetical comments (e.g. "(Smiles) こんにちは" -> "こんにちは")
-    const speechText = text.replace(/\([\s\S]*?\)/g, '').trim();
+    // and completely strip out emojis and decorative symbols so that the TTS doesn't read them literally.
+    const speechText = text
+      .replace(/\([\s\S]*?\)/g, '')
+      .replace(/[\u2600-\u27BF]/g, '') // Basic decorative symbols, dingbats, stars, hearts
+      .replace(/\p{Emoji_Presentation}/gu, '') // Standard colorful presentation emojis
+      .replace(/\p{Extended_Pictographic}/gu, '') // Extended pictographic characters/symbols
+      .replace(/[\uE000-\uF8FF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]/g, '') // Extra fallback symbol ranges
+      .trim();
     if (!speechText) return;
 
     // A. Setup local SpeechSynthesis utterance as backup
     const utterance = new SpeechSynthesisUtterance(speechText);
-    utterance.lang = 'ja-JP';
+    
+    // Determine language code based on selected voice language state
+    let mappedLang = 'ja-JP';
+    if (voiceLanguage === 'es_mx') mappedLang = 'es-MX';
+    else if (voiceLanguage === 'es_es') mappedLang = 'es-ES';
+    else if (voiceLanguage === 'en_us') mappedLang = 'en-US';
+    else if (voiceLanguage === 'en_gb') mappedLang = 'en-GB';
+    
+    utterance.lang = mappedLang;
     speechUtteranceRef.current = utterance;
 
     const voices = window.speechSynthesis.getVoices();
-    let japaneseVoice = voices.find(voice => voice.lang.startsWith('ja') || voice.lang.includes('JP'));
-    if (!japaneseVoice) {
-      japaneseVoice = voices.find(voice => /ja|jp/i.test(voice.lang));
+    let selectedVoice = null;
+    
+    if (voiceLanguage === 'ja') {
+      selectedVoice = voices.find(voice => voice.lang.startsWith('ja') || voice.lang.includes('JP'));
+      if (!selectedVoice) selectedVoice = voices.find(voice => /ja|jp/i.test(voice.lang));
+    } else if (voiceLanguage.startsWith('es')) {
+      const targetLangSub = voiceLanguage === 'es_mx' ? 'MX' : 'ES';
+      selectedVoice = voices.find(voice => voice.lang.includes(targetLangSub)) || voices.find(voice => voice.lang.startsWith('es'));
+    } else if (voiceLanguage.startsWith('en')) {
+      const targetLangSub = voiceLanguage === 'en_us' ? 'US' : 'GB';
+      selectedVoice = voices.find(voice => voice.lang.includes(targetLangSub)) || voices.find(voice => voice.lang.startsWith('en'));
     }
-    if (japaneseVoice) {
-      utterance.voice = japaneseVoice;
+    
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
     }
 
     // Default unmodified parameters for natural, unmodified voice output
@@ -968,6 +1144,15 @@ export default function App() {
     // Local Phonetic Vowel Extractor
     const getJapaneseVowel = (char) => {
       if (!char) return null;
+      
+      // Western/Vocalic characters support for Spanish/English
+      const lowerChar = char.toLowerCase();
+      if (['a', 'á', 'à', 'ä', 'â'].includes(lowerChar)) return 'aa';
+      if (['i', 'í', 'ì', 'ï', 'î'].includes(lowerChar)) return 'ih';
+      if (['u', 'ú', 'ù', 'ü', 'û'].includes(lowerChar)) return 'uu';
+      if (['e', 'é', 'è', 'ë', 'ê'].includes(lowerChar)) return 'ee';
+      if (['o', 'ó', 'ò', 'ö', 'ô'].includes(lowerChar)) return 'oh';
+
       const aChars = /[あかさたなはまやらわかがざだばぱァカサタナハマヤラワガザダバパ]/;
       const iChars = /[いきしちにひみりぎじぢびぴィキシチニヒミリギジヂビピ]/;
       const uChars = /[うくすつぬふむゆるぐずづぶぷぅゥクスツヌフムユルグズヅブプ]/;
@@ -1031,7 +1216,7 @@ export default function App() {
         body: JSON.stringify({
           data: [
             speechText,
-            "ja-JP-NanamiNeural - ja-JP (Female)", // Match exact formatted dropdown choice string
+            avatarVoice || "ja-JP-NanamiNeural - ja-JP (Female)", // Match exact formatted dropdown choice string
             0,                                     // Unmodified speed adjustment rate slider
             0                                      // Unmodified pitch adjustment Hz slider
           ]
@@ -1116,7 +1301,7 @@ export default function App() {
     }
   };
 
-  // Send Message to AI (Gemini or Ollama)
+  // Send Message to AI with Real-Time Token Streaming & Sentence-Splitting Voice Synthesis Queue
   const handleSendMessage = async (e) => {
     e?.preventDefault();
     if (!inputValue.trim() || isLoading) return;
@@ -1125,20 +1310,54 @@ export default function App() {
     setInputValue('');
     setIsLoading(true);
 
+    // 1. Detener de inmediato cualquier voz actual y vaciar la cola anterior (Soporte de Interrupción Activa)
+    stopAndClearSpeechQueue();
 
+    // Configurar AbortController para poder cancelar el stream si el usuario interrumpe
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
 
-    // Add user message to history
+    // Determinar las directivas de idioma dinámicas
+    let dynamicPersonality = avatarPersonality || "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado.";
+    dynamicPersonality += "\nREGLA CRÍTICA DE FORMATO: No incluyas NUNCA emojis, emoticonos, iconos, estrellas (como ✨ o 💫) ni caracteres gráficos especiales en tus respuestas, ya que el motor de lectura de voz (TTS) los lee literalmente y daña la conversación. Escribe texto puro y natural.";
+
+    if (voiceLanguage === 'ja') {
+      dynamicPersonality += "\nResponde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji) con frases ultra-cortas de máximo 1 o 2 oraciones simples para sintetizar voz fácilmente. Termina con sufijos formales elegantes como です o ます.";
+    } else if (voiceLanguage === 'es_mx') {
+      dynamicPersonality += "\nResponde EXCLUSIVAMENTE en español natural de Latinoamérica con frases ultra-cortas de máximo 1 o 2 oraciones simples para sintetizar voz fácilmente. Habla con un carisma amigable, elegante y cautivador.";
+    } else if (voiceLanguage === 'es_es') {
+      dynamicPersonality += "\nResponde EXCLUSIVAMENTE en español de España con frases ultra-cortas de máximo 1 o 2 oraciones simples para sintetizar voz fácilmente. Habla con un tono refinado, elegante y cautivador.";
+    } else if (voiceLanguage === 'en_us') {
+      dynamicPersonality += "\nRespond EXCLUSIVELY in fluent, natural American English using ultra-short sentences (maximum 1 or 2 simple sentences) for easy voice synthesis. Speak with a charming, polite, and elegant tone.";
+    } else if (voiceLanguage === 'en_gb') {
+      dynamicPersonality += "\nRespond EXCLUSIVELY in fluent, natural British English using ultra-short sentences (maximum 1 or 2 simple sentences) for easy voice synthesis. Speak with a very polite, elegant, and charming British tone.";
+    }
+
+    let translationHeader = 'Respuesta sintetizada.';
+    if (voiceLanguage === 'ja') translationHeader = 'Respuesta en japonés.';
+    else if (voiceLanguage.startsWith('es')) translationHeader = 'Respuesta en español.';
+    else if (voiceLanguage.startsWith('en')) translationHeader = 'Respuesta en inglés.';
+
+    // Añadir mensaje del usuario al historial
     setMessages(prev => [...prev, { sender: 'user', text: userMessage }]);
 
     try {
-      let aiResponseText = '';
+      let fullResponseText = '';
+      let sentenceBuffer = '';
+
+      // Añadir la burbuja de respuesta del asistente vacía que se irá actualizando en tiempo real
+      setMessages(prev => [...prev, { sender: 'assistant', text: '', translation: translationHeader + ' (Procesando...)', isStreaming: true }]);
 
       if (engine === 'gemini') {
         if (!geminiKey) {
           throw new Error('Por favor, ingresa tu API Key de Gemini en el panel de configuración.');
         }
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel || 'gemini-2.5-flash'}:generateContent?key=${geminiKey}`;
+        // Endpoint de flujo asíncrono SSE oficial de Gemini
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel || 'gemini-2.5-flash'}:streamGenerateContent?alt=sse&key=${geminiKey}`;
 
         const response = await fetch(url, {
           method: 'POST',
@@ -1148,7 +1367,7 @@ export default function App() {
               {
                 role: 'user',
                 parts: [{
-                  text: `${avatarPersonality || 'Eres Chronos.'}
+                  text: `${dynamicPersonality}
                     
                     Historial de chat para contexto:
                     ${messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n')}
@@ -1160,16 +1379,69 @@ export default function App() {
               maxOutputTokens: 150,
               temperature: 0.85
             }
-          })
+          }),
+          signal
         });
 
         if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.error?.message || 'Error al conectar con la API de Gemini');
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || 'Error al conectar con la API de Gemini Stream');
         }
 
-        const data = await response.json();
-        aiResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Preservar línea parcial para la siguiente lectura
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || !trimmedLine.startsWith('data:')) continue;
+            
+            const dataStr = trimmedLine.slice(5).trim();
+            if (dataStr === '[DONE]') continue;
+
+            try {
+              const data = JSON.parse(dataStr);
+              const textChunk = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+              if (textChunk) {
+                fullResponseText += textChunk;
+                sentenceBuffer += textChunk;
+
+                // Actualizar burbuja de chat progresivamente
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated.length > 0) {
+                    updated[updated.length - 1] = {
+                      sender: 'assistant',
+                      text: fullResponseText,
+                      translation: translationHeader + ' (Escribiendo...)'
+                    };
+                  }
+                  return updated;
+                });
+
+                // Analizar límites de oración para enviar a la cola de voz al instante
+                // Busca delimitadores comunes: puntos, signos de interrogación/exclamación, saltos de línea, etc.
+                const boundaryMatch = sentenceBuffer.match(/([^.?!;。？\n]+[.?!;。？\n]+)/g);
+                if (boundaryMatch) {
+                  for (const phrase of boundaryMatch) {
+                    queueSpeech(phrase.trim());
+                    sentenceBuffer = sentenceBuffer.replace(phrase, '');
+                  }
+                }
+              }
+            } catch (e) {
+              // Ignorar errores menores por líneas JSON incompletas durante el stream
+            }
+          }
+        }
 
       } else if (engine === 'openrouter') {
         if (!openrouterKey) {
@@ -1186,10 +1458,11 @@ export default function App() {
           },
           body: JSON.stringify({
             model: openrouterModel || 'google/gemini-2.5-flash',
+            stream: true, // Habilitar streaming nativo de OpenRouter
             messages: [
               {
                 role: 'system',
-                content: avatarPersonality || "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples). Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera). No respondas en español ni en inglés."
+                content: dynamicPersonality
               },
               ...messages.slice(-6).map(m => ({
                 role: m.sender === 'user' ? 'user' : 'assistant',
@@ -1200,57 +1473,178 @@ export default function App() {
                 content: userMessage
               }
             ]
-          })
+          }),
+          signal
         });
 
         if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.error?.message || 'Error al conectar con la API de OpenRouter');
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || 'Error al conectar con la API de OpenRouter Stream');
         }
 
-        const data = await response.json();
-        aiResponseText = data.choices?.[0]?.message?.content || '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || !trimmedLine.startsWith('data:')) continue;
+
+            const dataStr = trimmedLine.slice(5).trim();
+            if (dataStr === '[DONE]') continue;
+
+            try {
+              const data = JSON.parse(dataStr);
+              const textChunk = data.choices?.[0]?.delta?.content || '';
+              if (textChunk) {
+                fullResponseText += textChunk;
+                sentenceBuffer += textChunk;
+
+                // Actualizar burbuja
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated.length > 0) {
+                    updated[updated.length - 1] = {
+                      sender: 'assistant',
+                      text: fullResponseText,
+                      translation: translationHeader + ' (Escribiendo...)'
+                    };
+                  }
+                  return updated;
+                });
+
+                // Sentence Splitter
+                const boundaryMatch = sentenceBuffer.match(/([^.?!;。？\n]+[.?!;。？\n]+)/g);
+                if (boundaryMatch) {
+                  for (const phrase of boundaryMatch) {
+                    queueSpeech(phrase.trim());
+                    sentenceBuffer = sentenceBuffer.replace(phrase, '');
+                  }
+                }
+              }
+            } catch (e) { }
+          }
+        }
 
       } else {
-        // OLLAMA
+        // OLLAMA (Stream nativo por JSON Lines)
         const response = await fetch(`${ollamaUrl}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: ollamaModel || 'llama3',
-            system: avatarPersonality || "You are Chronos (クロノス), an elegant gothic-digital cyber-assistant. Speak exclusively in highly polite, mystical Japanese. Keep replies extremely short (1-2 sentences max). Always end with formal suffixes (です, ます, でしょう). Do not speak any English or Spanish.",
+            system: dynamicPersonality,
             prompt: userMessage,
-            stream: false
-          })
+            stream: true // Habilitar streaming nativo de Ollama
+          }),
+          signal
         });
 
         if (!response.ok) {
-          throw new Error('No se pudo conectar al servidor Ollama. Asegúrate de tener Ollama activo en local.');
+          throw new Error('No se pudo conectar al servidor Ollama local. Revisa si Ollama está corriendo.');
         }
 
-        const data = await response.json();
-        aiResponseText = data.response || '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) continue;
+
+            try {
+              const data = JSON.parse(trimmedLine);
+              const textChunk = data.response || '';
+              if (textChunk) {
+                fullResponseText += textChunk;
+                sentenceBuffer += textChunk;
+
+                // Actualizar burbuja
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated.length > 0) {
+                    updated[updated.length - 1] = {
+                      sender: 'assistant',
+                      text: fullResponseText,
+                      translation: translationHeader + ' (Escribiendo...)'
+                    };
+                  }
+                  return updated;
+                });
+
+                // Sentence Splitter
+                const boundaryMatch = sentenceBuffer.match(/([^.?!;。？\n]+[.?!;。？\n]+)/g);
+                if (boundaryMatch) {
+                  for (const phrase of boundaryMatch) {
+                    queueSpeech(phrase.trim());
+                    sentenceBuffer = sentenceBuffer.replace(phrase, '');
+                  }
+                }
+              }
+            } catch (e) { }
+          }
+        }
       }
 
-      aiResponseText = aiResponseText.trim();
-      let translation = 'Respuesta en japonés sintetizada.';
+      // Procesar cualquier frase remanente en el buffer
+      if (sentenceBuffer.trim()) {
+        queueSpeech(sentenceBuffer.trim());
+      }
 
-
-
-      // Add AI response to history
-      setMessages(prev => [...prev, { sender: 'assistant', text: aiResponseText, translation }]);
-
-      // Trigger TTS and Lipsync
-      speakText(aiResponseText);
+      // Finalizar estado de streaming de la burbuja
+      setMessages(prev => {
+        const updated = [...prev];
+        if (updated.length > 0) {
+          updated[updated.length - 1] = {
+            sender: 'assistant',
+            text: fullResponseText.trim(),
+            translation: translationHeader + ' (Sintetizada ⏳)'
+          };
+        }
+        return updated;
+      });
 
     } catch (err) {
+      if (err.name === 'AbortError') {
+        console.log("Stream cancelado por interrupción del usuario.");
+        return;
+      }
       console.error(err);
 
-      setMessages(prev => [...prev, {
-        sender: 'assistant',
-        text: `エラーが発生しました: ${err.message}`,
-        translation: `Ocurrió un error: ${err.message}`
-      }]);
+      setMessages(prev => {
+        const updated = [...prev];
+        // Reemplazar burbuja vacía con el mensaje de error
+        if (updated.length > 0 && updated[updated.length - 1].sender === 'assistant' && !updated[updated.length - 1].text) {
+          updated[updated.length - 1] = {
+            sender: 'assistant',
+            text: `Error de conexión: ${err.message}`,
+            translation: `Ocurrió un problema de stream: ${err.message}`
+          };
+        } else {
+          updated.push({
+            sender: 'assistant',
+            text: `Error de conexión: ${err.message}`,
+            translation: `Ocurrió un problema de stream: ${err.message}`
+          });
+        }
+        return updated;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -1660,6 +2054,87 @@ export default function App() {
               <div className="control-subheader">
                 <Volume2 style={{ width: '0.9rem', height: '0.9rem', color: 'var(--crimson-neon)' }} />
                 <span>AJUSTES DE VOZ (TTS)</span>
+              </div>
+
+              {/* Language Selection */}
+              <div style={{ marginBottom: '0.85rem' }}>
+                <span className="drawer-label" style={{ marginBottom: '0.35rem', display: 'block', fontSize: '0.7rem' }}>Idioma del Avatar</span>
+                <select
+                  value={voiceLanguage}
+                  onChange={(e) => handleLanguageChange(e.target.value)}
+                  className="text-input-settings"
+                  style={{
+                    width: '100%',
+                    height: '2rem',
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    borderRadius: '6px',
+                    color: 'var(--crystal-white)',
+                    fontSize: '0.75rem',
+                    padding: '0 0.5rem',
+                    cursor: 'pointer',
+                    outline: 'none'
+                  }}
+                >
+                  <option value="ja" style={{ background: '#111', color: '#fff' }}>Japonés (日本語)</option>
+                  <option value="es_mx" style={{ background: '#111', color: '#fff' }}>Español Latino (México)</option>
+                  <option value="es_es" style={{ background: '#111', color: '#fff' }}>Español Castellano (España)</option>
+                  <option value="en_us" style={{ background: '#111', color: '#fff' }}>Inglés Americano (US)</option>
+                  <option value="en_gb" style={{ background: '#111', color: '#fff' }}>Inglés Británico (UK)</option>
+                </select>
+              </div>
+
+              {/* Voice Selection */}
+              <div style={{ marginBottom: '1.25rem' }}>
+                <span className="drawer-label" style={{ marginBottom: '0.35rem', display: 'block', fontSize: '0.7rem' }}>Voz del Personaje</span>
+                <select
+                  value={avatarVoice}
+                  onChange={(e) => setAvatarVoice(e.target.value)}
+                  className="text-input-settings"
+                  style={{
+                    width: '100%',
+                    height: '2rem',
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    borderRadius: '6px',
+                    color: 'var(--crystal-white)',
+                    fontSize: '0.75rem',
+                    padding: '0 0.5rem',
+                    cursor: 'pointer',
+                    outline: 'none'
+                  }}
+                >
+                  {voiceLanguage === 'ja' && (
+                    <>
+                      <option value="ja-JP-NanamiNeural - ja-JP (Female)" style={{ background: '#111', color: '#fff' }}>Nanami (Femenina - Premium 🌸)</option>
+                      <option value="ja-JP-KeitaNeural - ja-JP (Male)" style={{ background: '#111', color: '#fff' }}>Keita (Masculina 🕶️)</option>
+                    </>
+                  )}
+                  {voiceLanguage === 'es_mx' && (
+                    <>
+                      <option value="es-MX-DaliaNeural - es-MX (Female)" style={{ background: '#111', color: '#fff' }}>Dalia (Femenina - Premium 🇲🇽)</option>
+                      <option value="es-MX-JorgeNeural - es-MX (Male)" style={{ background: '#111', color: '#fff' }}>Jorge (Masculina 🇲🇽)</option>
+                    </>
+                  )}
+                  {voiceLanguage === 'es_es' && (
+                    <>
+                      <option value="es-ES-ElviraNeural - es-ES (Female)" style={{ background: '#111', color: '#fff' }}>Elvira (Femenina - Premium 🇪🇸)</option>
+                      <option value="es-ES-AlvaroNeural - es-ES (Male)" style={{ background: '#111', color: '#fff' }}>Álvaro (Masculina 🇪🇸)</option>
+                    </>
+                  )}
+                  {voiceLanguage === 'en_us' && (
+                    <>
+                      <option value="en-US-AriaNeural - en-US (Female)" style={{ background: '#111', color: '#fff' }}>Aria (Femenina - Premium 🇺🇸)</option>
+                      <option value="en-US-GuyNeural - en-US (Male)" style={{ background: '#111', color: '#fff' }}>Guy (Masculina 🇺🇸)</option>
+                    </>
+                  )}
+                  {voiceLanguage === 'en_gb' && (
+                    <>
+                      <option value="en-GB-SoniaNeural - en-GB (Female)" style={{ background: '#111', color: '#fff' }}>Sonia (Femenina - Premium 🇬🇧)</option>
+                      <option value="en-GB-RyanNeural - en-GB (Male)" style={{ background: '#111', color: '#fff' }}>Ryan (Masculina 🇬🇧)</option>
+                    </>
+                  )}
+                </select>
               </div>
 
               {/* Volume */}
