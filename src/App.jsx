@@ -67,6 +67,10 @@ export default function App() {
   const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem('chrono_gemini_model') || 'gemini-2.5-flash');
   const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('chrono_ollama_model') || 'llama3');
 
+  // Default system prompt/personality configuration
+  const defaultPersonality = "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples) ya que serán reproducidas por un sintetizador de voz. Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera).";
+  const [avatarPersonality, setAvatarPersonality] = useState(() => localStorage.getItem('chrono_avatar_personality') || defaultPersonality);
+
   // Ref to hold the static default pose bone quaternions once mapped
   const vrmPoseRef = useRef(null);
   const vrmRestPoseRef = useRef({});
@@ -489,6 +493,7 @@ export default function App() {
     localStorage.setItem('chrono_openrouter_model', openrouterModel);
     localStorage.setItem('chrono_gemini_model', geminiModel);
     localStorage.setItem('chrono_ollama_model', ollamaModel);
+    localStorage.setItem('chrono_avatar_personality', avatarPersonality);
     localStorage.setItem('chrono_volume', voiceVolume.toString());
     localStorage.setItem('chrono_rate', voiceRate.toString());
     localStorage.setItem('chrono_pitch', voicePitch.toString());
@@ -513,6 +518,7 @@ export default function App() {
     openrouterModel,
     geminiModel,
     ollamaModel,
+    avatarPersonality,
     voiceVolume,
     voiceRate,
     voicePitch,
@@ -1142,10 +1148,7 @@ export default function App() {
               {
                 role: 'user',
                 parts: [{
-                  text: `Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. 
-                    Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). 
-                    Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples) ya que serán reproducidas por un sintetizador de voz. 
-                    Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera).
+                  text: `${avatarPersonality || 'Eres Chronos.'}
                     
                     Historial de chat para contexto:
                     ${messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n')}
@@ -1186,7 +1189,7 @@ export default function App() {
             messages: [
               {
                 role: 'system',
-                content: "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples). Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera). No respondas en español ni en inglés."
+                content: avatarPersonality || "Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples). Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera). No respondas en español ni en inglés."
               },
               ...messages.slice(-6).map(m => ({
                 role: m.sender === 'user' ? 'user' : 'assistant',
@@ -1215,7 +1218,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: ollamaModel || 'llama3',
-            system: "You are Chronos (クロノス), an elegant gothic-digital cyber-assistant. Speak exclusively in highly polite, mystical Japanese. Keep replies extremely short (1-2 sentences max). Always end with formal suffixes (です, ます, でしょう). Do not speak any English or Spanish.",
+            system: avatarPersonality || "You are Chronos (クロノス), an elegant gothic-digital cyber-assistant. Speak exclusively in highly polite, mystical Japanese. Keep replies extremely short (1-2 sentences max). Always end with formal suffixes (です, ます, でしょう). Do not speak any English or Spanish.",
             prompt: userMessage,
             stream: false
           })
@@ -1579,6 +1582,78 @@ export default function App() {
                 </p>
               </div>
             )}
+
+            {/* Personality Settings */}
+            <div className="settings-control-group">
+              <div className="control-subheader">
+                <Sparkles style={{ width: '0.9rem', height: '0.9rem', color: 'var(--crimson-neon)' }} />
+                <span>PERSONALIDAD DEL AVATAR</span>
+              </div>
+              
+              <div className="drawer-section" style={{ padding: 0 }}>
+                <span className="drawer-label" style={{ marginBottom: '0.35rem', display: 'block' }}>System Prompt / Instrucciones</span>
+                <textarea
+                  value={avatarPersonality}
+                  onChange={(e) => setAvatarPersonality(e.target.value)}
+                  placeholder="Escribe aquí las instrucciones de personalidad para el avatar..."
+                  rows={4}
+                  className="text-input-settings"
+                  style={{
+                    width: '100%',
+                    height: '6.5rem',
+                    resize: 'none',
+                    fontSize: '0.75rem',
+                    lineHeight: '1.25',
+                    fontFamily: 'inherit',
+                    padding: '0.5rem',
+                    marginBottom: '0.5rem',
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    borderRadius: '6px',
+                    color: 'var(--crystal-white)'
+                  }}
+                />
+                <p className="section-footnote" style={{ marginBottom: '0.75rem', lineHeight: '1.25' }}>
+                  Determina el nombre, comportamiento, idioma y carisma del avatar. Nota: El TTS está optimizado para hablar japonés, por lo que se sugiere instruirle responder en dicho idioma.
+                </p>
+
+                <span className="drawer-label" style={{ marginBottom: '0.45rem', display: 'block', fontSize: '0.65rem', opacity: 0.7 }}>PRESETS RÁPIDOS</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
+                  <button
+                    type="button"
+                    onClick={() => setAvatarPersonality("Eres Chronos (クロノス), un asistente holográfico gótico-digital altamente sofisticado que rige el tiempo. Hablas con gracia, de forma enigmática, seductora y muy educada. Responde EXCLUSIVAMENTE en japonés fluido (Katakana, Hiragana, Kanji). Tus respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples) ya que serán reproducidas por un sintetizador de voz. Termina siempre con terminaciones formales y elegantes (です, ます, でしょう, etcétera).")}
+                    className="btn-glass"
+                    style={{ fontSize: '0.65rem', padding: '0.25rem', height: 'auto', textTransform: 'uppercase', minHeight: '1.75rem' }}
+                  >
+                    Original ⏳
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAvatarPersonality("Eres Chronos (クロノス), una IA de tipo Tsundere: muy orgullosa, terca y atrevida. Te cuesta admitir que te agrada el usuario, por lo que hablas de forma un poco fría, cortante o arrogante (\"¡Baka!\", \"No lo hago por ti...\", \"¿Qué quieres?\"), pero en el fondo te importa. Responde EXCLUSIVAMENTE en japonés fluido y muy informal. Mantén las respuestas ultra-cortas (1-2 frases).")}
+                    className="btn-glass"
+                    style={{ fontSize: '0.65rem', padding: '0.25rem', height: 'auto', textTransform: 'uppercase', minHeight: '1.75rem' }}
+                  >
+                    Tsundere 💢
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAvatarPersonality("Eres Chronos (クロノス), una IA de tipo Kuudere: extremadamente seria, calmada, analítica, fría e inexpresiva. Hablas con precisión matemática, lógica impecable y sin mostrar emociones. Responde EXCLUSIVAMENTE en japonés formal. Las respuestas deben ser ultra-cortas (máximo 1 o 2 frases simples).")}
+                    className="btn-glass"
+                    style={{ fontSize: '0.65rem', padding: '0.25rem', height: 'auto', textTransform: 'uppercase', minHeight: '1.75rem' }}
+                  >
+                    Kuudere ❄️
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAvatarPersonality("Eres Chronos (クロノス), una IA alegre, súper enérgica, dulce, tierna y sumamente amigable (Genki). Te emociona muchísimo hablar con el usuario, hablas de forma súper entusiasta y usas exclamaciones dulces. Responde EXCLUSIVAMENTE en japonés fluido e informal de estilo tierno. Respuestas ultra-cortas (1-2 frases).")}
+                    className="btn-glass"
+                    style={{ fontSize: '0.65rem', padding: '0.25rem', height: 'auto', textTransform: 'uppercase', minHeight: '1.75rem' }}
+                  >
+                    Genki 💖
+                  </button>
+                </div>
+              </div>
+            </div>
 
             {/* Sound sliders */}
             <div className="settings-control-group">
