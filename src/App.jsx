@@ -64,6 +64,8 @@ export default function App() {
   const [orbitControlsEnabled, setOrbitControlsEnabled] = useState(false);
   const [openrouterKey, setOpenrouterKey] = useState(() => localStorage.getItem('chrono_openrouter_key') || '');
   const [openrouterModel, setOpenrouterModel] = useState(() => localStorage.getItem('chrono_openrouter_model') || 'google/gemini-2.5-flash');
+  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem('chrono_gemini_model') || 'gemini-2.5-flash');
+  const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('chrono_ollama_model') || 'llama3');
 
   // Ref to hold the static default pose bone quaternions once mapped
   const vrmPoseRef = useRef(null);
@@ -78,10 +80,10 @@ export default function App() {
   }, []);
 
   // Hardcoded cinematographic defaults for perfect framing centered positioning
-  const vrmPosX = -0.16;
-  const vrmPosY = -1.38;
-  const vrmPosZ = 0.0;
-  const vrmScale = 1.15;
+  const vrmPosX = -0.5;
+  const vrmPosY = 0.0;
+  const vrmPosZ = -9.0;
+  const vrmScale = 1.0;
 
   // WebGL & 3D Refs
   const canvasRef = useRef(null);
@@ -202,7 +204,7 @@ export default function App() {
       const mixamoRigName = trackSplitted[0].replace(/:/g, ''); // strip colons
       const vrmBoneName = MIXAMO_VRM_MAP[mixamoRigName];
       const boneNode = vrmInstance.humanoid?.getNormalizedBoneNode(vrmBoneName);
-      
+
       if (boneNode) {
         const vrmNodeName = boneNode.name;
         const propertyName = trackSplitted[1];
@@ -221,7 +223,7 @@ export default function App() {
             for (let i = 0; i < values.length; i += 4) {
               _quatA.set(values[i], values[i + 1], values[i + 2], values[i + 3]);
               _quatA.premultiply(parentRestWorldRotation).multiply(restRotationInverse);
-              
+
               values[i] = _quatA.x;
               values[i + 1] = _quatA.y;
               values[i + 2] = _quatA.z;
@@ -379,13 +381,17 @@ export default function App() {
       setCurrentVrmUrl(url);
       setCustomVrmName(file.name);
     }
+    // Reset file input value to empty so that choosing the same file again triggers the onChange event
+    if (event.target) {
+      event.target.value = '';
+    }
   };
 
   // Custom External URL Loader (With clean validation)
   const handleCustomVrmUrlLoad = (e) => {
     e.preventDefault();
     if (!vrmUrlInput.trim()) return;
-    
+
     let url = vrmUrlInput.trim();
     // Simple sanitization
     if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('/')) {
@@ -401,7 +407,7 @@ export default function App() {
       if (part && part.toLowerCase().endsWith('.vrm')) {
         name = part;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     setCurrentVrmUrl(url);
     setCustomVrmName(name);
@@ -428,10 +434,10 @@ export default function App() {
   const loadFbxPose = (vrmInstance, onComplete) => {
     const fbxLoader = new FBXLoader();
     fbxLoader.load(
-      '/Female Standing Pose.fbx',
+      '/Standing Idle.fbx',
       (fbx) => {
         console.log('FBX Pose loaded successfully:', fbx);
-        
+
         // 1. Retarget Mixamo FBX Pose to VRM AnimationClip perfectly using coordinate basis transformations
         const vrmAnimation = retargetMixamoClip(fbx, vrmInstance);
         if (vrmAnimation) {
@@ -441,11 +447,11 @@ export default function App() {
           action.loop = THREE.LoopOnce;
           action.clampWhenFinished = true;
           action.play();
-          
+
           // Evaluate the pose synchronously on the first frame
           mixer.setTime(0.01);
           vrmInstance.scene.updateMatrixWorld(true);
-          
+
           vrmMixerRef.current = mixer;
         }
 
@@ -481,6 +487,8 @@ export default function App() {
     localStorage.setItem('chrono_ollama_url', ollamaUrl);
     localStorage.setItem('chrono_openrouter_key', openrouterKey);
     localStorage.setItem('chrono_openrouter_model', openrouterModel);
+    localStorage.setItem('chrono_gemini_model', geminiModel);
+    localStorage.setItem('chrono_ollama_model', ollamaModel);
     localStorage.setItem('chrono_volume', voiceVolume.toString());
     localStorage.setItem('chrono_rate', voiceRate.toString());
     localStorage.setItem('chrono_pitch', voicePitch.toString());
@@ -503,6 +511,8 @@ export default function App() {
     ollamaUrl,
     openrouterKey,
     openrouterModel,
+    geminiModel,
+    ollamaModel,
     voiceVolume,
     voiceRate,
     voicePitch,
@@ -513,7 +523,7 @@ export default function App() {
   const resetCameraToCinematic = () => {
     if (cameraRef.current && controlsRef.current) {
       controlsRef.current.target.set(0.0, 1.45 + vrmPosY, vrmPosZ);
-      cameraRef.current.position.set(0.0, 1.48 + vrmPosY, 0.75 + vrmPosZ);
+      cameraRef.current.position.set(0.0, 1.48 + vrmPosY, 2.35 + vrmPosZ);
       controlsRef.current.update();
     }
   };
@@ -657,7 +667,7 @@ export default function App() {
         // 2. Breathing Layer (Dynamic Sine Wave) on Spine & Chest (layers over the rest pose!)
         const breathingSpeed = 2.0;
         const breathingAngle = Math.sin(elapsed * breathingSpeed) * 0.015;
-        
+
         const spineNode = vrmRef.current.humanoid.getNormalizedBoneNode('spine');
         if (spineNode) {
           const baseSpine = vrmRestPoseRef.current && vrmRestPoseRef.current['spine'] ? vrmRestPoseRef.current['spine'] : new THREE.Quaternion();
@@ -678,16 +688,16 @@ export default function App() {
         if (neckNode && headNode) {
           const targetHeadY = mouseCoordsRef.current ? mouseCoordsRef.current.x * 0.28 : 0; // Yaw
           const targetHeadX = mouseCoordsRef.current ? mouseCoordsRef.current.y * 0.18 : 0; // Pitch
-          
+
           const targetNeckQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(targetHeadX * 0.4, targetHeadY * 0.4, 0));
           const targetHeadQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(targetHeadX * 0.6, targetHeadY * 0.6, 0));
-          
+
           const baseNeck = vrmRestPoseRef.current && vrmRestPoseRef.current['neck'] ? vrmRestPoseRef.current['neck'] : new THREE.Quaternion();
           const baseHead = vrmRestPoseRef.current && vrmRestPoseRef.current['head'] ? vrmRestPoseRef.current['head'] : new THREE.Quaternion();
-          
+
           const finalNeck = baseNeck.clone().multiply(targetNeckQuat);
           const finalHead = baseHead.clone().multiply(targetHeadQuat);
-          
+
           neckNode.quaternion.slerp(finalNeck, 0.1);
           headNode.quaternion.slerp(finalHead, 0.1);
         }
@@ -732,7 +742,7 @@ export default function App() {
           const average = sum / (count || 1);
           // Normalize average to [0.0, 1.0] range (human speech peak is around 110-120 in byte frequency values)
           const rawVol = Math.min(1.0, average / 115.0);
-          
+
           // Smoothen the volume reading to eliminate high frequency frame jitters
           currentSpeakingVolumeRef.current += (rawVol - currentSpeakingVolumeRef.current) * 0.28;
         } else if (!isSpeakingRef.current) {
@@ -754,7 +764,7 @@ export default function App() {
             const speed = 14.0;
             // The chatter magnitude is directly driven by the volume of the audio!
             const chatter = volumeFactor * Math.max(0.2, Math.sin(elapsed * speed) + Math.cos(elapsed * speed * 0.75)) * 0.42;
-            
+
             // Morph dynamically between vowels for realistic jaw and lip movements
             const vowelMix = Math.sin(elapsed * 3.5);
             if (vowelMix > 0.4) {
@@ -772,10 +782,10 @@ export default function App() {
             // Local Phonetic-Mapped Syllable Lipsync
             if (vowelTimerRef.current > 0) {
               vowelTimerRef.current -= delta;
-              
+
               // Add a natural breathing vibrato/jitter to the speaking mouth shape
               const jitter = 0.85 + Math.sin(elapsed * 25.0) * 0.15;
-              
+
               if (activeVowelRef.current === 'aa') targetA = 0.75 * jitter;
               else if (activeVowelRef.current === 'ih') targetI = 0.65 * jitter;
               else if (activeVowelRef.current === 'oh') targetO = 0.70 * jitter;
@@ -788,7 +798,7 @@ export default function App() {
               targetA = chatter;
             }
           }
-          
+
           targetSmile = 0.24 + Math.sin(elapsed * 4.0) * 0.08;
         } else {
           // Subtle breathing micro-smile to make the idle character feel warm and "alive"
@@ -868,7 +878,7 @@ export default function App() {
         audioRef.current = null;
       }
       if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current.close().catch(() => { });
         audioContextRef.current = null;
       }
     };
@@ -909,7 +919,7 @@ export default function App() {
     }
     window.speechSynthesis.cancel();
     window.speechSynthesis.resume(); // Chrome TTS hang-up queue fix
-    
+
     setIsSpeaking(false);
     isSpeakingRef.current = false;
     isEdgeTTSActiveRef.current = false;
@@ -1052,7 +1062,7 @@ export default function App() {
     if (isEdgeTTSSuccessful && ttsUrl) {
       // PLAY PREMIUM EDGE-TTS WITH NATIVE HARDWARE AUDIO DIRECTLY (100% pure & unfiltered)
       isEdgeTTSActiveRef.current = true;
-      
+
       const audio = getAudioInstance();
       if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
         audioContextRef.current.resume();
@@ -1115,7 +1125,7 @@ export default function App() {
           throw new Error('Por favor, ingresa tu API Key de Gemini en el panel de configuración.');
         }
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel || 'gemini-2.5-flash'}:generateContent?key=${geminiKey}`;
 
         const response = await fetch(url, {
           method: 'POST',
@@ -1197,7 +1207,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: 'llama3',
+            model: ollamaModel || 'llama3',
             system: "You are Chronos (クロノス), an elegant gothic-digital cyber-assistant. Speak exclusively in highly polite, mystical Japanese. Keep replies extremely short (1-2 sentences max). Always end with formal suffixes (です, ます, でしょう). Do not speak any English or Spanish.",
             prompt: userMessage,
             stream: false
@@ -1489,8 +1499,16 @@ export default function App() {
                   placeholder="AIzaSy..."
                   className="text-input-settings"
                 />
-                <p className="section-footnote">
-                  La API Key se guarda localmente en tu navegador de forma segura.
+                <span className="drawer-label" style={{ marginTop: '1rem', display: 'block' }}>ID de Modelo Gemini</span>
+                <input
+                  type="text"
+                  value={geminiModel}
+                  onChange={(e) => setGeminiModel(e.target.value)}
+                  placeholder="gemini-2.5-flash"
+                  className="text-input-settings"
+                />
+                <p className="section-footnote" style={{ marginTop: '0.25rem' }}>
+                  Por defecto usa <code style={{ color: 'var(--gold-brass)' }}>gemini-2.5-flash</code> (rápido y recomendado) o puedes escribir <code style={{ color: 'var(--gold-brass)' }}>gemini-2.5-pro</code>.
                 </p>
               </div>
             )}
@@ -1541,8 +1559,16 @@ export default function App() {
                   placeholder="http://localhost:11434"
                   className="text-input-settings"
                 />
-                <p className="section-footnote">
-                  Asegúrate de tener Ollama ejecutándose de fondo y configurado para permitir CORS (`OLLAMA_ORIGINS="*"`).
+                <span className="drawer-label" style={{ marginTop: '1rem', display: 'block' }}>ID de Modelo Ollama</span>
+                <input
+                  type="text"
+                  value={ollamaModel}
+                  onChange={(e) => setOllamaModel(e.target.value)}
+                  placeholder="llama3"
+                  className="text-input-settings"
+                />
+                <p className="section-footnote" style={{ marginTop: '0.25rem' }}>
+                  Asegúrate de que el modelo esté descargado localmente (ej. <code style={{ color: 'var(--gold-brass)' }}>llama3</code>, <code style={{ color: 'var(--gold-brass)' }}>gemma2</code>, <code style={{ color: 'var(--gold-brass)' }}>mistral</code>, o <code style={{ color: 'var(--gold-brass)' }}>deepseek-r1</code>).
                 </p>
               </div>
             )}
