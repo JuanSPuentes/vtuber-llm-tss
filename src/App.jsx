@@ -522,8 +522,8 @@ export default function App() {
   // Reset Camera to focus on the facial framing center of the VRM
   const resetCameraToCinematic = () => {
     if (cameraRef.current && controlsRef.current) {
-      controlsRef.current.target.set(0.0, 1.45 + vrmPosY, vrmPosZ);
-      cameraRef.current.position.set(0.0, 1.48 + vrmPosY, 2.35 + vrmPosZ);
+      controlsRef.current.target.set(0.0, 1.0 + vrmPosY, vrmPosZ);
+      cameraRef.current.position.set(0.0, 1.1 + vrmPosY, 2.35 + vrmPosZ);
       controlsRef.current.update();
     }
   };
